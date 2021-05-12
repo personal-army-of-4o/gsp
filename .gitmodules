@@ -1,0 +1,6 @@
+[submodule "grlib"]
+	path = grlib
+	url = https://github.com/ffffffcat/grlib.git
+[submodule "hw_tester"]
+	path = hw_tester
+	url = https://github.com/ffffffcat/hw_tester.git

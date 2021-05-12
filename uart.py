@@ -6,13 +6,14 @@ except:
 try:
     import asyncio
     import cocotb
-    from cocotb.triggers import Timer
+    from cocotb.triggers import Timer, Edge, First
 except:
     print("WARNING: failed to load cocotb stuff")
 
 
 class uart:
-    def __init__(self, rx, tx, brate = 115200, sim='cocotb'):
+    def __init__(self, rx, tx, brate = 115200, sim='cocotb',  verbose = False):
+        self.v = verbose
         self.rx = rx
         self.tx = tx
         self.rxbuf = queue.Queue()
@@ -24,11 +25,21 @@ class uart:
         elif sim == 'cocotb':
             t = cocotb.utils.get_time_from_sim_steps(1, 'sec')
             self.cocotb_steps = int((1 / brate) / t)
+        if self.v:
+            print("uart: verbose mode on")
 
-    def put(self, data, block = True):
+    def write(self, data):
+        self.put(data)
+
+    def read(self, size):
+        return self.get(len = size)
+
+    def put(self, data, block = True, verbose = True):
+        if self.v & verbose:
+            print("uart: added data to queue:", data)
         if isinstance(data, list):
-            for i in range(data):
-                if self.put(data[i], block):
+            for i in range(len(data)):
+                if self.put(data[i], block, False):
                     return data[i:]
         else:
             try:
@@ -36,19 +47,21 @@ class uart:
             except:
                 return data
 
-    def get(self, block = True, len = 1):
+    def get(self, block = True, len = 1, verbose = True):
+        ret = []
         if len == 1:
             try:
-                return self.rxbuf.get(block)
+                ret = self.rxbuf.get(block)
             except:
                 return None
         elif len > 1:
-            ret = []
             for _ in range(len):
                 add = self.get()
-                if add:
+                if add != None:
                     ret.append(add)
-            return ret
+        if self.v & verbose:
+            print("uart: got data from queue:", ret)
+        return ret
 
     def get_test_processes(self):
         if self.sim == 'nmigen':
@@ -58,6 +71,9 @@ class uart:
 
     def kill(self):
         self.go_on = False
+
+    def close(self):
+        self.kill()
 
     def txp(self):
         yield self.tx.eq(1)
@@ -72,9 +88,10 @@ class uart:
                 yield from self._tx(d)
             else:
                 yield Delay(self.step)
-        print("txp done")
 
     async def txc(self):
+        if self.v:
+            print("uart: cocotb write process started")
         s = self.cocotb_steps
         self.tx <= 1
         await Timer(s*4, 'step')
@@ -84,32 +101,40 @@ class uart:
                 d = self.txbuf.get(block = False)
             except:
                 pass
+                go_on = False
             if d != None:
                 self.tx <= 0
                 await Timer(s, 'step')
+                if self.v:
+                    print("sending", d)
                 for i in range(8):
                     self.tx <= d % 2
                     d = d >> 1
                     await Timer(s, 'step')
                 self.tx <= 1
-                await Timer(s, 'step')
-            else:
-                await Timer(s, 'step')
-        print("txp done")
+            await Timer(s, 'step')
+        if self.v:
+            print("uart: cocotb write process closed")
 
     async def rxc(self):
+        if self.v:
+            print("uart: cocotb read process started")
         s = self.cocotb_steps
         while self.go_on:
             d = 0
             while self.rx.value.binstr != "1":
                 print("test:", self.rx)
                 if self.go_on == False:
+                    if self.v:
+                        print("uart: cocotb read process closed")
                     return
-                await Timer(s, 'step')
-            while self.rx.value == 1:
+                await First(Timer(s, 'step'), Edge(self.rx))
+            while self.rx.value.binstr != "0":
                 if self.go_on == False:
+                    if self.v:
+                        print("uart: cocotb read process closed")
                     return
-                await Timer(s, 'step')
+                await First(Timer(s, 'step'), Edge(self.rx))
             for i in range(8):
                 await Timer(s, 'step')
                 d |= (self.rx.value % 2) << i
@@ -119,13 +144,17 @@ class uart:
                 while self.rx.value != 1:
                     if self.go_on == False:
                         d = None
-                    await Timer(s, 'step')
-            else:
-                await Timer(s, 'step')
+                        if self.v:
+                            print("uart: cocotb read process closed")
+                        return
+                    await First(Timer(s, 'step'), Edge(self.rx))
 
+            if self.v:
+                print("got", d)
             if d != None:
                 self.rxbuf.put(d)
-        print("rxp done")
+        if self.v:
+            print("uart: cocotb read process closed")
 
     def rxp(self):
         while self.go_on:
@@ -159,7 +188,6 @@ class uart:
             d |= ((yield self.rx) % 2) << i
         yield Delay(self.step)
         if (yield self.rx) != 1:
-            print("got break")
             while (yield self.rx) != 1:
                 if self.go_on == False:
                     return
